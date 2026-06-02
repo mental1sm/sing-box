@@ -6,6 +6,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -53,12 +56,14 @@ type Inbound struct {
 	h3Server         io.Closer
 }
 
+// NewInbound FORKED
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.NaiveInboundOptions) (adapter.Inbound, error) {
 	inbound := &Inbound{
 		Adapter: inbound.NewAdapter(C.TypeNaive, tag),
 		ctx:     ctx,
 		router:  uot.NewRouter(router, logger),
 		logger:  logger,
+		options: options,
 		listener: listener.New(listener.Options{
 			Context: ctx,
 			Logger:  logger,
@@ -147,26 +152,65 @@ func (n *Inbound) Close() error {
 	)
 }
 
+// ServeHTTP FORKED
 func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	ctx := log.ContextWithNewID(request.Context())
+
+	serveFallback := func() bool {
+		if n.options.FallbackSite.Address != "" && n.options.FallbackSite.Port != 0 {
+			targetHost := net.JoinHostPort(n.options.FallbackSite.Address, strconv.Itoa(n.options.FallbackSite.Port))
+
+			var targetURL *url.URL
+			if n.options.FallbackSite.ForceHTTPS {
+				targetURL, _ = url.Parse("https://" + targetHost)
+			} else {
+				targetURL, _ = url.Parse("http://" + targetHost)
+			}
+
+			proxy := httputil.NewSingleHostReverseProxy(targetURL)
+			request.Header.Del("Proxy-Authorization")
+			request.Header.Del("Padding")
+			request.Header.Del("-connect-authority")
+
+			proxy.ServeHTTP(writer, request)
+			return true
+		}
+		return false
+	}
+
 	if request.Method != "CONNECT" {
+		if serveFallback() {
+			return
+		}
 		rejectHTTP(writer, http.StatusBadRequest)
-		n.badRequest(ctx, request, E.New("not CONNECT request"))
-		return
-	} else if request.Header.Get("Padding") == "" {
-		rejectHTTP(writer, http.StatusBadRequest)
-		n.badRequest(ctx, request, E.New("missing naive padding"))
+		n.badRequest(ctx, request, E.New("Decoy Site not configured. Received not CONNECT method request"))
 		return
 	}
+
+	if request.Header.Get("Padding") == "" {
+		if serveFallback() {
+			return
+		}
+		rejectHTTP(writer, http.StatusBadRequest)
+		n.badRequest(ctx, request, E.New("Decoy Site not configured. Missing naive padding"))
+	}
+
 	userName, password, authOk := sHttp.ParseBasicAuth(request.Header.Get("Proxy-Authorization"))
 	if authOk {
 		authOk = n.authenticator.Verify(userName, password)
 	}
 	if !authOk {
+		if serveFallback() {
+			n.logger.InfoContext(ctx, "Unauthorized request routed to Decoy Site from ", request)
+			return
+		}
 		rejectHTTP(writer, http.StatusProxyAuthRequired)
-		n.badRequest(ctx, request, E.New("authorization failed"))
+		n.badRequest(ctx, request, E.New("Decoy Site not configured. Authorization failed"))
 		return
 	}
+
+	// --------------------------- Successfully started naive proxy session --------------------------------------------
+
 	writer.Header().Set("Padding", generatePaddingHeader())
 	writer.WriteHeader(http.StatusOK)
 	writer.(http.Flusher).Flush()

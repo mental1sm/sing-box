@@ -16,11 +16,20 @@ const (
 	QuicheCongestionControlReno    QuicheCongestionControl = "RENO"
 )
 
+// FallbackSite FORKED
+type FallbackSite struct {
+	Address    string `json:"address,omitempty"`
+	Port       int    `json:"port,omitempty"`
+	ForceHTTPS bool   `json:"force_https,omitempty"` // If true, proxied to [https://], else proxied to [http://]
+}
+
+// NaiveInboundOptions FORKED
 type NaiveInboundOptions struct {
 	ListenOptions
-	Users                 []auth.User `json:"users,omitempty"`
-	Network               NetworkList `json:"network,omitempty"`
-	QUICCongestionControl string      `json:"quic_congestion_control,omitempty"`
+	Users                 []auth.User  `json:"users,omitempty"`
+	Network               NetworkList  `json:"network,omitempty"`
+	QUICCongestionControl string       `json:"quic_congestion_control,omitempty"`
+	FallbackSite          FallbackSite `json:"fallback_site,omitempty"`
 	InboundTLSOptionsContainer
 }
 
