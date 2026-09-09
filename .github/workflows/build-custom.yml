@@ -20,13 +20,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Get Version
         shell: bash
         run: |
-          VERSION=$(git describe --tags --abbrev=0 --exclude="*custom*" 2>/dev/null || echo "v-custom")
+          VERSION=$(git describe --tags --abbrev=0 --match="v*" 2>/dev/null || git describe --tags --abbrev=0 --match="1.*" 2>/dev/null || echo "v-custom")
           echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Defined version: $VERSION"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -42,49 +42,42 @@ jobs:
           mkdir -p output
           FILENAME="sing-box"
           if [ "${{ matrix.os }}" = "windows" ]; then
-            FILENAME="$FILENAME.exe"
+            FILENAME="sing-box.exe"
           fi
-          
-          echo "Building $FILENAME ..."
           go build -v -trimpath -ldflags "-s -w -buildid= -checklinkname=0" -tags "with_quic,with_grpc,with_dhcp,with_utls,with_gvisor,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0" -o output/$FILENAME ./cmd/sing-box
 
       - name: Fetch libcronet
         shell: bash
         run: |
           CRONET_VERSION=$(cat .github/CRONET_GO_VERSION 2>/dev/null || echo "HEAD")
-          echo "Using cronet: $CRONET_VERSION"
-          
           git clone --filter=blob:none --no-checkout https://github.com/sagernet/cronet-go.git cronet_temp
           cd cronet_temp
           git checkout "$CRONET_VERSION" -- lib/${{ matrix.os }}_${{ matrix.arch }} 2>/dev/null || true
-          
           if [ -d "lib/${{ matrix.os }}_${{ matrix.arch }}" ]; then
-            cp lib/${{ matrix.os }}_${{ matrix.arch }}/* ../output/ 2>/dev/null || true
-            echo "Cronet succesfully copied."
-          else
-            echo "Directory with libs ${{ matrix.os }}_${{ matrix.arch }} not found. Skipping."
+            cp lib/${{ matrix.os }}_${{ matrix.arch }}/*.so ../output/ 2>/dev/null || true
+            cp lib/${{ matrix.os }}_${{ matrix.arch }}/*.dll ../output/ 2>/dev/null || true
           fi
 
       - name: Create Archive
-        working-directory: output
         shell: bash
         run: |
+          mkdir -p release_assets
+          cd output
           ARCHIVE_NAME="sing-box-${{ env.APP_VERSION }}-custom-${{ matrix.os }}-${{ matrix.arch }}"
-          
           if [ "${{ matrix.os }}" = "windows" ]; then
-            zip -r "${ARCHIVE_NAME}.zip" *
-            rm *.exe *.dll 2>/dev/null || true
+            zip -j "../release_assets/${ARCHIVE_NAME}.zip" sing-box.exe *.dll 2>/dev/null || zip -j "../release_assets/${ARCHIVE_NAME}.zip" sing-box.exe
           else
-            tar -czvf "${ARCHIVE_NAME}.tar.gz" *
-            rm sing-box *.so 2>/dev/null || true
+            tar -czvf "../release_assets/${ARCHIVE_NAME}.tar.gz" sing-box *.so 2>/dev/null || tar -czvf "../release_assets/${ARCHIVE_NAME}.tar.gz" sing-box
           fi
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: output/*
+          files: release_assets/*
           tag_name: "${{ env.APP_VERSION }}-custom-${{ github.run_number }}"
           name: "${{ env.APP_VERSION }} Build #${{ github.run_number }} (FallbackSite)"
           body: |
             Build with FallbackSite for NaiveProxy.
             Based on: **${{ env.APP_VERSION }}**
+            - Includes executable and libcronet (if available).
+            - Built with `with_purego`.
