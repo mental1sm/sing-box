@@ -12,6 +12,7 @@ type NaiveInboundOptions struct {
 	Network               NetworkList `json:"network,omitempty"`
 	QUICCongestionControl string      `json:"quic_congestion_control,omitempty" enum:"bbr,cubic,reno"`
 	InboundTLSOptionsContainer
+	FallbackSite FallbackSite `json:"fallback_site,omitempty"`
 }
 
 type NaiveOutboundOptions struct {
@@ -27,4 +28,10 @@ type NaiveOutboundOptions struct {
 	QUICCongestionControl    string                   `json:"quic_congestion_control,omitempty" enum:"bbr,bbr2,cubic,reno"`
 	QUICSessionReceiveWindow *byteformats.MemoryBytes `json:"quic_session_receive_window,omitempty"`
 	OutboundTLSOptionsContainer
+}
+
+type FallbackSite struct {
+	Address    string `json:"address,omitempty"`
+	Port       int    `json:"port,omitempty"`
+	ForceHTTPS bool   `json:"force_https,omitempty"` // If true, proxied to [https://], else proxied to [http://]
 }
