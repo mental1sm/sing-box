@@ -2,9 +2,14 @@
 icon: material/new-box
 ---
 
-!!! quote "Changes in sing-box 1.14.0"
+!!! quote "Changes in sing-box 1.15.0"
 
     :material-plus: [auto_redirect_tproxy_mark](#auto_redirect_tproxy_mark)  
+    :material-plus: [multi_queue](#multi_queue)  
+    :material-alert-decagram: [stack](#stack)
+
+!!! quote "Changes in sing-box 1.14.0"
+
     :material-plus: [include_mac_address](#include_mac_address)  
     :material-plus: [exclude_mac_address](#exclude_mac_address)  
     :material-plus: [dns_mode](#dns_mode)  
@@ -121,6 +126,7 @@ icon: material/new-box
   ... // UDP NAT Fields
 
   "stack": "system",
+  "multi_queue": false,
   "include_interface": [
     "lan0"
   ],
@@ -390,7 +396,7 @@ Connection reset mark used by `auto_redirect` pre-matching.
 
 #### auto_redirect_tproxy_mark
 
-!!! question "Since sing-box 1.14.0"
+!!! question "Since sing-box 1.15.0"
 
 Connection TPROXY mark used by the `auto_redirect` iptables backend for IPv6 TCP.
 
@@ -569,6 +575,10 @@ Performance may degrade slightly, so it is not recommended to enable on when it 
 
 #### stack
 
+!!! quote "Changes in sing-box 1.15.0"
+
+    :material-plus: The `go` stack has been added and is now the default.
+
 !!! quote "Changes in sing-box 1.8.0"
 
     :material-delete-alert: The legacy LWIP stack has been deprecated and removed.
@@ -577,11 +587,23 @@ TCP/IP stack.
 
 | Stack    | Description                                                                                           | 
 |----------|-------------------------------------------------------------------------------------------------------|
+| `go`     | Perform L3 to L4 translation using the built-in userspace network stack                               |
 | `system` | Perform L3 to L4 translation using the system network stack                                           |
 | `gvisor` | Perform L3 to L4 translation using [gVisor](https://github.com/google/gvisor)'s virtual network stack |
 | `mixed`  | Mixed `system` TCP stack and `gvisor` UDP stack                                                       |
 
-Defaults to the `mixed` stack if the gVisor build tag is enabled, otherwise defaults to the `system` stack.
+The `go` stack is written for sing-box, does not depend on gVisor, and uses significantly less memory
+than the `gvisor` and `mixed` stacks.
+
+Defaults to the `go` stack.
+
+#### multi_queue
+
+!!! quote ""
+
+    Only supported on Linux, and requires the `go` stack.
+
+Enable multi-queue support based on `IFF_MULTI_QUEUE`, allowing throughput to scale with the number of CPU cores.
 
 #### include_interface
 
