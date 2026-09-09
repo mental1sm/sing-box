@@ -24,7 +24,7 @@ jobs:
       - name: Get Version
         shell: bash
         run: |
-          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v-custom")
+          VERSION=$(git describe --tags --abbrev=0 --exclude="*custom*" 2>/dev/null || echo "v-custom")
           echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
           echo "Defined version: $VERSION"
 
@@ -40,13 +40,44 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p output
-          FILENAME="sing-box-${{ matrix.os }}-${{ matrix.arch }}"
+          FILENAME="sing-box"
           if [ "${{ matrix.os }}" = "windows" ]; then
             FILENAME="$FILENAME.exe"
           fi
           
-          echo "Собираем $FILENAME ..."
+          echo "Building $FILENAME ..."
           go build -v -trimpath -ldflags "-s -w -buildid= -checklinkname=0" -tags "with_quic,with_grpc,with_dhcp,with_utls,with_gvisor,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0" -o output/$FILENAME ./cmd/sing-box
+
+      - name: Fetch libcronet
+        shell: bash
+        run: |
+          CRONET_VERSION=$(cat .github/CRONET_GO_VERSION 2>/dev/null || echo "HEAD")
+          echo "Using cronet: $CRONET_VERSION"
+          
+          git clone --filter=blob:none --no-checkout https://github.com/sagernet/cronet-go.git cronet_temp
+          cd cronet_temp
+          git checkout "$CRONET_VERSION" -- lib/${{ matrix.os }}_${{ matrix.arch }} 2>/dev/null || true
+          
+          if [ -d "lib/${{ matrix.os }}_${{ matrix.arch }}" ]; then
+            cp lib/${{ matrix.os }}_${{ matrix.arch }}/* ../output/ 2>/dev/null || true
+            echo "Cronet succesfully copied."
+          else
+            echo "Directory with libs ${{ matrix.os }}_${{ matrix.arch }} not found. Skipping."
+          fi
+
+      - name: Create Archive
+        working-directory: output
+        shell: bash
+        run: |
+          ARCHIVE_NAME="sing-box-${{ env.APP_VERSION }}-custom-${{ matrix.os }}-${{ matrix.arch }}"
+          
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            zip -r "${ARCHIVE_NAME}.zip" *
+            rm *.exe *.dll 2>/dev/null || true
+          else
+            tar -czvf "${ARCHIVE_NAME}.tar.gz" *
+            rm sing-box *.so 2>/dev/null || true
+          fi
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
