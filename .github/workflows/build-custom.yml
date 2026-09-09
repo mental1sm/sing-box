@@ -20,6 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -29,7 +30,9 @@ jobs:
       - name: Get Version
         shell: bash
         run: |
-          VERSION=$(go run ./cmd/internal/read_tag || echo "unknown")
+          git fetch --tags https://github.com/sagernet/sing-box.git
+          RAW_VERSION=$(git describe --tags --match="v*" --abbrev=0 2>/dev/null || echo "v0.0.0-custom")
+          VERSION=${RAW_VERSION#v}
           echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Build Sing-box
@@ -73,8 +76,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release_assets/*
-          tag_name: "fallbacksite-${{ github.run_number }}"
-          name: "FallbackSite Build #${{ github.run_number }}"
+          tag_name: "${{ env.APP_VERSION }}-${{ github.run_number }}"
+          name: "${{ env.APP_VERSION }} Build #${{ github.run_number }}"
           body: |
             Build with FallbackSite for NaiveProxy.
             Based on: **${{ env.APP_VERSION }}**
