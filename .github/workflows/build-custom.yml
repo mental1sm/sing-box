@@ -18,11 +18,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get Version
+        shell: bash
+        run: |
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v-custom")
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Defined version: $VERSION"
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26.7'
 
       - name: Build Sing-box
         env:
@@ -31,19 +40,20 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p output
-          FILENAME="sing-box-custom-${{ matrix.os }}-${{ matrix.arch }}"
+          FILENAME="sing-box-${{ matrix.os }}-${{ matrix.arch }}"
           if [ "${{ matrix.os }}" = "windows" ]; then
             FILENAME="$FILENAME.exe"
           fi
           
-          echo "Building $FILENAME ..."
+          echo "Собираем $FILENAME ..."
           go build -v -trimpath -ldflags "-s -w -buildid= -checklinkname=0" -tags "with_quic,with_grpc,with_dhcp,with_utls,with_gvisor,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0" -o output/$FILENAME ./cmd/sing-box
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           files: output/*
-          tag_name: custom-build-${{ github.run_number }}
-          name: "Custom Build #${{ github.run_number }} (FallbackSite Patch)"
+          tag_name: "${{ env.APP_VERSION }}-custom-${{ github.run_number }}"
+          name: "${{ env.APP_VERSION }} Build #${{ github.run_number }} (FallbackSite)"
           body: |
             Build with FallbackSite for NaiveProxy.
+            Based on: **${{ env.APP_VERSION }}**
