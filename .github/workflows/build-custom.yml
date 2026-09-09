@@ -1,4 +1,4 @@
-name: Custom Sing-box Build
+name: Build
 
 on:
   workflow_dispatch:
@@ -25,7 +25,10 @@ jobs:
       - name: Get Version
         shell: bash
         run: |
-          VERSION=$(git describe --tags --abbrev=0 --match="v*" 2>/dev/null || git describe --tags --abbrev=0 --match="1.*" 2>/dev/null || echo "v-custom")
+          VERSION=$(git tag -l "v1.*" --sort=-v:refname | head -n 1)
+          if [ -z "$VERSION" ]; then
+            VERSION="latest"
+          fi
           echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Setup Go
@@ -63,7 +66,7 @@ jobs:
         run: |
           mkdir -p release_assets
           cd output
-          ARCHIVE_NAME="sing-box-${{ env.APP_VERSION }}-custom-${{ matrix.os }}-${{ matrix.arch }}"
+          ARCHIVE_NAME="sing-box-${{ matrix.os }}-${{ matrix.arch }}"
           if [ "${{ matrix.os }}" = "windows" ]; then
             zip -j "../release_assets/${ARCHIVE_NAME}.zip" sing-box.exe *.dll 2>/dev/null || zip -j "../release_assets/${ARCHIVE_NAME}.zip" sing-box.exe
           else
@@ -74,8 +77,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release_assets/*
-          tag_name: "${{ env.APP_VERSION }}-custom-${{ github.run_number }}"
-          name: "${{ env.APP_VERSION }} Build #${{ github.run_number }} (FallbackSite)"
+          tag_name: "fallbacksite-${{ github.run_number }}"
+          name: "FallbackSite Build #${{ github.run_number }}"
           body: |
             Build with FallbackSite for NaiveProxy.
             Based on: **${{ env.APP_VERSION }}**
