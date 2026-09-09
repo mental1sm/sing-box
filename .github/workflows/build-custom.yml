@@ -1,0 +1,49 @@
+name: Custom Sing-box Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [linux, windows]
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build Sing-box
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p output
+          FILENAME="sing-box-custom-${{ matrix.os }}-${{ matrix.arch }}"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            FILENAME="$FILENAME.exe"
+          fi
+          
+          echo "Building $FILENAME ..."
+          go build -v -trimpath -ldflags "-s -w -buildid= -checklinkname=0" -tags "with_quic,with_grpc,with_dhcp,with_utls,with_gvisor,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0" -o output/$FILENAME ./cmd/sing-box
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/*
+          tag_name: custom-build-${{ github.run_number }}
+          name: "Custom Build #${{ github.run_number }} (FallbackSite Patch)"
+          body: |
+            Build with FallbackSite for NaiveProxy.
