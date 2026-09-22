@@ -46,7 +46,7 @@ jobs:
           if [ "${{ matrix.os }}" = "windows" ]; then
             FILENAME="sing-box.exe"
           fi
-          go build -v -trimpath -ldflags "-s -w -buildid= -checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ env.APP_VERSION }}'" -tags "with_quic,with_grpc,with_dhcp,with_utls,with_gvisor,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0" -o output/$FILENAME ./cmd/sing-box
+          go build -v -trimpath -ldflags "-s -w -buildid= -checklinkname=0 -X 'github.com/sagernet/sing-box/constant.Version=${{ env.APP_VERSION }}'" -tags "with_quic,with_grpc,with_dhcp,with_utls,with_gvisor,with_wireguard,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0" -o output/$FILENAME ./cmd/sing-box
 
       - name: Fetch libcronet
         shell: bash
