@@ -2,16 +2,19 @@ package wireguard
 
 import (
 	"context"
-	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/kernelports"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
+	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
@@ -25,7 +28,10 @@ type systemDevice struct {
 	options      DeviceOptions
 	dialer       N.Dialer
 	device       tun.Tun
+	ports        atomic.Pointer[kernelports.Pool]
 	batchDevice  tun.LinuxTUN
+	readBuffers  [][]byte
+	readSizes    []int
 	events       chan wgTun.Event
 	closeOnce    sync.Once
 	inet4Address netip.Addr
@@ -36,22 +42,7 @@ func newSystemDevice(options DeviceOptions) (*systemDevice, error) {
 	if options.Name == "" {
 		options.Name = tun.CalculateInterfaceName("wg")
 	}
-	var inet4Address netip.Addr
-	var inet6Address netip.Addr
-	if len(options.Address) > 0 {
-		if prefix := common.Find(options.Address, func(it netip.Prefix) bool {
-			return it.Addr().Is4()
-		}); prefix.IsValid() {
-			inet4Address = prefix.Addr()
-		}
-	}
-	if len(options.Address) > 0 {
-		if prefix := common.Find(options.Address, func(it netip.Prefix) bool {
-			return it.Addr().Is6()
-		}); prefix.IsValid() {
-			inet6Address = prefix.Addr()
-		}
-	}
+	inet4Address, inet6Address := deviceAddresses(options.Address)
 	return &systemDevice{
 		options:      options,
 		dialer:       options.CreateDialer(options.Name),
@@ -77,7 +68,15 @@ func (w *systemDevice) Inet6Address() netip.Addr {
 	return w.inet6Address
 }
 
-func (w *systemDevice) SetDevice(device *device.Device) {
+func (w *systemDevice) SetDevice(device *device.Device, peers []*device.Peer) {
+}
+
+func (w *systemDevice) UpstreamPort() any {
+	ports := w.ports.Load()
+	if ports == nil {
+		return nil
+	}
+	return ports
 }
 
 func (w *systemDevice) Start() error {
@@ -115,6 +114,12 @@ func (w *systemDevice) Start() error {
 		tunInterface.Close()
 		return err
 	}
+	ports, err := kernelports.New()
+	if err != nil {
+		w.options.Logger.Warn(E.Cause(err, "reserve selector ports"))
+	} else {
+		w.ports.Store(ports)
+	}
 	w.options.Logger.Info("started at ", w.options.Name)
 	w.device = tunInterface
 	batchTUN, isBatchTUN := tunInterface.(tun.LinuxTUN)
@@ -129,18 +134,33 @@ func (w *systemDevice) File() *os.File {
 	return nil
 }
 
-func (w *systemDevice) Read(bufs [][]byte, sizes []int, offset int) (count int, err error) {
-	if w.batchDevice != nil {
-		count, err = w.batchDevice.BatchRead(bufs, offset-tun.PacketOffset, sizes)
-	} else {
-		sizes[0], err = w.device.Read(bufs[0][offset-tun.PacketOffset:])
-		if err == nil {
-			count = 1
-		} else if errors.Is(err, tun.ErrTooManySegments) {
-			err = wgTun.ErrTooManySegments
+func (w *systemDevice) Read(slab []byte, packets []wgTun.ReadPacket) (int, error) {
+	if w.batchDevice == nil {
+		n, err := w.device.Read(slab[wgTun.ReadPacketSpacing-tun.PacketOffset : len(slab)-wgTun.ReadPacketSpacing])
+		if err != nil {
+			return 0, err
 		}
+		if n < tun.PacketOffset {
+			return 0, io.ErrUnexpectedEOF
+		}
+		packets[0] = wgTun.ReadPacket{Offset: wgTun.ReadPacketSpacing, Size: n - tun.PacketOffset}
+		return 1, nil
 	}
-	return
+	stride := wgTun.ReadPacketSpacing + int(w.options.MTU)
+	batchSize := min(len(packets), (len(slab)-wgTun.ReadPacketSpacing)/stride)
+	if cap(w.readBuffers) < batchSize {
+		w.readBuffers = make([][]byte, batchSize)
+		w.readSizes = make([]int, batchSize)
+	}
+	buffers := w.readBuffers[:batchSize]
+	for i := range buffers {
+		buffers[i] = slab[i*stride : (i+1)*stride]
+	}
+	count, err := w.batchDevice.BatchRead(buffers, wgTun.ReadPacketSpacing, w.readSizes[:batchSize])
+	for i := range count {
+		packets[i] = wgTun.ReadPacket{Offset: i*stride + wgTun.ReadPacketSpacing, Size: w.readSizes[i]}
+	}
+	return count, err
 }
 
 func (w *systemDevice) Write(bufs [][]byte, offset int) (count int, err error) {
@@ -184,6 +204,10 @@ func (w *systemDevice) Close() error {
 		close(w.events)
 		if w.device != nil {
 			err = w.device.Close()
+		}
+		ports := w.ports.Load()
+		if ports != nil {
+			err = E.Errors(err, ports.Close())
 		}
 	})
 	return err

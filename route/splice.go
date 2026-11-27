@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/iponly"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
@@ -20,11 +21,12 @@ import (
 
 type spliceTarget struct {
 	socket        tun.SpliceSocket
+	offload       N.PacketOffload
 	readCounters  []N.CountFunc
 	writeCounters []N.CountFunc
 }
 
-func unwrapSpliceTarget(conn any) (spliceTarget, bool) {
+func unwrapSpliceTarget(conn any, allowOffload bool) (spliceTarget, bool) {
 	var target spliceTarget
 	for {
 		readCounter, isReadCounter := conn.(N.ReadCounter)
@@ -57,6 +59,23 @@ func unwrapSpliceTarget(conn any) (spliceTarget, bool) {
 			target.readCounters = append(target.readCounters, readCounters...)
 			target.writeCounters = append(target.writeCounters, writeCounters...)
 			conn = reader
+			continue
+		}
+		if allowOffload {
+			upstream, offload := N.UnwrapPacketOffload(conn)
+			if offload != nil {
+				socket, isSocket := upstream.(tun.SpliceSocket)
+				if !isSocket {
+					return spliceTarget{}, false
+				}
+				target.socket = socket
+				target.offload = offload
+				return target, true
+			}
+		}
+		ipOnlyConn, isIPOnly := conn.(*iponly.PacketConn)
+		if isIPOnly {
+			conn = ipOnlyConn.Upstream()
 			continue
 		}
 		readerWithUpstream, isReaderWithUpstream := conn.(N.ReaderWithUpstream)
@@ -112,7 +131,7 @@ func (m *ConnectionManager) spliceConnection(ctx context.Context, conn net.Conn,
 	if !isGoConn {
 		return false, nil
 	}
-	target, isTarget := unwrapSpliceTarget(remoteConn)
+	target, isTarget := unwrapSpliceTarget(remoteConn, false)
 	if !isTarget {
 		return false, nil
 	}
@@ -235,7 +254,7 @@ func (m *ConnectionManager) splicePacketConnection(ctx context.Context, conn N.P
 	if !isSpliceSource {
 		return conn, false
 	}
-	target, isTarget := unwrapSpliceTarget(remote)
+	target, isTarget := unwrapSpliceTarget(remote, true)
 	if !isTarget {
 		return conn, false
 	}
@@ -261,9 +280,12 @@ func (m *ConnectionManager) splicePacketConnection(ctx context.Context, conn N.P
 			WriteCounters: append(target.readCounters, spliceSource.writeCounters...),
 			OnClose:       m.spliceClose(ctx, conn, remote.(io.Closer), onClose),
 		},
-		Timeout: udpTimeout,
-		NAT:     nat,
-		Cached:  cached,
+		Timeout:       udpTimeout,
+		NAT:           nat,
+		Cached:        cached,
+		Offload:       target.offload,
+		FrontHeadroom: N.CalculateFrontHeadroom(remote),
+		RearHeadroom:  N.CalculateRearHeadroom(remote),
 	}) {
 		return conn, true
 	}

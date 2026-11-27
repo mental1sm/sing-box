@@ -1,4 +1,4 @@
-//go:build with_gvisor && windows
+//go:build with_tailscale && windows
 
 package tailssh
 
@@ -85,6 +85,14 @@ func newAgentListener(localUser *adapter.PlatformUser) (net.Listener, error) {
 		return nil, E.Cause(err, "listen on agent pipe")
 	}
 	return listener, nil
+}
+
+func chownUserSocket(_ net.Listener, _ *adapter.PlatformUser) error {
+	return nil
+}
+
+func privilegedPortRestricted(_ *adapter.PlatformUser) bool {
+	return false
 }
 
 func platformEnvironment(localUser *adapter.PlatformUser) []string {

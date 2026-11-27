@@ -66,8 +66,6 @@ type CacheFile struct {
 	flushAccess       sync.Mutex
 	flushTimer        *time.Timer
 	flushSignal       chan struct{}
-	done              chan struct{}
-	closeOnce         sync.Once
 }
 
 type saveCacheKey struct {
@@ -124,7 +122,6 @@ func New(ctx context.Context, logger logger.Logger, options option.CacheFileOpti
 		pending:       newPendingWrites(),
 		flushTimer:    flushTimer,
 		flushSignal:   make(chan struct{}, 1),
-		done:          make(chan struct{}),
 	}
 }
 
@@ -148,17 +145,40 @@ func (c *CacheFile) SetDisableExpire(disableExpire bool) {
 	c.disableExpire = disableExpire
 }
 
-func (c *CacheFile) Start(stage adapter.StartStage) error {
+func (c *CacheFile) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	switch stage {
 	case adapter.StartStateInitialize:
-		return c.start()
+		err := c.start()
+		if err != nil {
+			return err
+		}
+		scope.Add(func() error {
+			db := c.database()
+			if db == nil {
+				return nil
+			}
+			return db.Close()
+		})
+		scope.Add(func() error {
+			c.flushTimer.Stop()
+			c.Flush()
+			return nil
+		})
+		var flushGroup sync.WaitGroup
+		scope.Add(func() error {
+			flushGroup.Wait()
+			return nil
+		})
+		flushGroup.Go(func() {
+			c.loopFlush(scope.Context())
+		})
 	case adapter.StartStateStart:
-		c.startCacheCleanup()
+		c.startCacheCleanup(scope.Context())
 	}
 	return nil
 }
 
-func (c *CacheFile) startCacheCleanup() {
+func (c *CacheFile) startCacheCleanup(ctx context.Context) {
 	if c.storeDNS {
 		c.clearRDRC()
 		c.cleanupDNSCache()
@@ -166,14 +186,14 @@ func (c *CacheFile) startCacheCleanup() {
 		if interval <= 0 {
 			interval = time.Hour
 		}
-		go c.loopCacheCleanup(interval, c.cleanupDNSCache)
+		go c.loopCacheCleanup(ctx, interval, c.cleanupDNSCache)
 	} else if c.storeRDRC {
 		c.cleanupRDRC()
 		interval := c.rdrcTimeout / 2
 		if interval <= 0 {
 			interval = time.Hour
 		}
-		go c.loopCacheCleanup(interval, c.cleanupRDRC)
+		go c.loopCacheCleanup(ctx, interval, c.cleanupRDRC)
 	}
 }
 
@@ -187,28 +207,22 @@ func (c *CacheFile) start() error {
 	var db *bbolt.DB
 	for range 10 {
 		db, err = bbolt.Open(c.path, fileMode, &databaseOptions)
-		if err != nil {
-			if errors.Is(err, bboltErrors.ErrTimeout) {
-				continue
+		if err == nil {
+			err = checkDatabase(db)
+			if err == nil {
+				break
 			}
-			if E.IsMulti(err, bboltErrors.ErrInvalid, bboltErrors.ErrChecksum, bboltErrors.ErrVersionMismatch) {
-				rmErr := filemanager.Remove(c.ctx, c.path)
-				if rmErr != nil {
-					return err
-				}
-			}
+			db.Close()
+		} else if errors.Is(err, bboltErrors.ErrTimeout) {
+			continue
+		} else if !E.IsMulti(err, bboltErrors.ErrInvalid, bboltErrors.ErrChecksum, bboltErrors.ErrVersionMismatch) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		err = checkDatabase(db)
-		if err == nil {
-			break
-		}
 		c.logger.Error("database corrupted: ", err, ": resetting")
-		db.Close()
 		rmErr := filemanager.Remove(c.ctx, c.path)
 		if rmErr != nil {
-			return err
+			return E.Errors(err, E.Cause(rmErr, "reset database"))
 		}
 	}
 	if err != nil {
@@ -243,23 +257,7 @@ func (c *CacheFile) start() error {
 		return err
 	}
 	c.DB = db
-	go c.loopFlush()
 	return nil
-}
-
-func (c *CacheFile) Close() error {
-	c.closeOnce.Do(func() {
-		close(c.done)
-	})
-	c.flushTimer.Stop()
-	c.dbAccess.RLock()
-	db := c.DB
-	c.dbAccess.RUnlock()
-	if db == nil {
-		return nil
-	}
-	c.Flush()
-	return db.Close()
 }
 
 func checkDatabase(db *bbolt.DB) error {
@@ -282,6 +280,9 @@ func (c *CacheFile) database() *bbolt.DB {
 
 func (c *CacheFile) view(fn func(tx *bbolt.Tx) error) (err error) {
 	db := c.database()
+	if db == nil {
+		return bboltErrors.ErrDatabaseNotOpen
+	}
 	defer func() {
 		r := recover()
 		if r != nil {
@@ -294,6 +295,9 @@ func (c *CacheFile) view(fn func(tx *bbolt.Tx) error) (err error) {
 
 func (c *CacheFile) batch(fn func(tx *bbolt.Tx) error) (err error) {
 	db := c.database()
+	if db == nil {
+		return bboltErrors.ErrDatabaseNotOpen
+	}
 	defer func() {
 		r := recover()
 		if r != nil {
@@ -302,8 +306,7 @@ func (c *CacheFile) batch(fn func(tx *bbolt.Tx) error) (err error) {
 		}
 	}()
 	err = db.Batch(fn)
-	var panicErr bbolt.PanickedError
-	if errors.As(err, &panicErr) {
+	if panicErr, ok := errors.AsType[bbolt.PanickedError](err); ok {
 		c.resetDB(db, panicErr.Reason)
 		return E.New("database corrupted: ", panicErr.Reason)
 	}
@@ -312,6 +315,9 @@ func (c *CacheFile) batch(fn func(tx *bbolt.Tx) error) (err error) {
 
 func (c *CacheFile) update(fn func(tx *bbolt.Tx) error) (err error) {
 	db := c.database()
+	if db == nil {
+		return bboltErrors.ErrDatabaseNotOpen
+	}
 	defer func() {
 		r := recover()
 		if r != nil {
@@ -330,12 +336,20 @@ func (c *CacheFile) resetDB(failedDB *bbolt.DB, reason any) {
 	}
 	c.logger.Error("database corrupted: ", reason, ": resetting")
 	failedDB.Close()
-	filemanager.Remove(c.ctx, c.path)
-	db, err := bbolt.Open(c.path, 0o666, &databaseOptions)
-	if err == nil {
-		_ = filemanager.Chown(c.ctx, c.path)
-		c.DB = db
+	err := filemanager.Remove(c.ctx, c.path)
+	if err != nil {
+		c.logger.Error(E.Cause(err, "reset database"))
+		c.DB = nil
+		return
 	}
+	db, err := bbolt.Open(c.path, 0o666, &databaseOptions)
+	if err != nil {
+		c.logger.Error(E.Cause(err, "reset database"))
+		c.DB = nil
+		return
+	}
+	_ = filemanager.Chown(c.ctx, c.path)
+	c.DB = db
 }
 
 func (c *CacheFile) StoreFakeIP() bool {

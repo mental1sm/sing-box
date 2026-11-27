@@ -1,4 +1,4 @@
-//go:build go1.27 && badlinkname
+//go:build go1.27 && !http2legacy && badlinkname
 
 package v2rayhttp
 
@@ -24,7 +24,7 @@ type internalTransport struct {
 
 // net/http/internal/http2.clientConnPool
 type clientConnPool struct {
-	t     *internalTransport
+	_     *internalTransport
 	mu    sync.Mutex
 	conns map[string][]unsafe.Pointer // key is host:port, value is []*ClientConn
 }

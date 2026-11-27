@@ -9,14 +9,16 @@ import (
 	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/badhttp"
 	"github.com/sagernet/sing-box/common/tls"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	sHTTP "github.com/sagernet/sing/protocol/http"
 )
 
 var _ adapter.V2RayClientTransport = (*Client)(nil)
@@ -40,7 +42,12 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	if options.Host != "" {
 		host = options.Host
 	} else if tlsConfig != nil && tlsConfig.ServerName() != "" {
-		host = tlsConfig.ServerName()
+		serverName := M.ParseSocksaddrHostPort(tlsConfig.ServerName(), 0)
+		if serverName.IsIPv6() {
+			host = "[" + serverName.AddrString() + "]"
+		} else {
+			host = serverName.AddrString()
+		}
 	} else {
 		host = serverAddr.String()
 	}
@@ -52,7 +59,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 	requestURL.Host = serverAddr.String()
 	requestURL.Path = options.Path
-	err := sHTTP.URLSetPath(&requestURL, options.Path)
+	err := badhttp.URLSetPath(&requestURL, options.Path)
 	if err != nil {
 		return nil, E.Cause(err, "parse path")
 	}
@@ -72,7 +79,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}, nil
 }
 
-func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+func (c *Client) DialContext(ctx context.Context) (result net.Conn, err error) {
 	conn, err := c.dialer.DialContext(ctx, N.NetworkTCP, c.serverAddr)
 	if err != nil {
 		return nil, err
@@ -85,6 +92,18 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	}
 	request.Header.Set("Connection", "Upgrade")
 	request.Header.Set("Upgrade", "websocket")
+	ctx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() {
+		conn.Close()
+	})
+	defer func() {
+		if !stop() {
+			common.Close(result)
+			result = nil
+			err = ctx.Err()
+		}
+	}()
 	err = request.Write(conn)
 	if err != nil {
 		conn.Close()
@@ -105,12 +124,13 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	}
 	if bufReader.Buffered() > 0 {
 		buffer := buf.NewSize(bufReader.Buffered())
-		_, err = buffer.ReadFullFrom(bufReader, buffer.Len())
+		_, err = buffer.ReadFullFrom(bufReader, buffer.FreeLen())
 		if err != nil {
+			buffer.Release()
 			conn.Close()
 			return nil, err
 		}
-		conn = bufio.NewCachedConn(conn, buffer)
+		return bufio.NewCachedConn(conn, buffer), nil
 	}
 	return conn, nil
 }

@@ -25,7 +25,11 @@ func TestMmapMatchesSource(t *testing.T) {
 			DefaultOptions: option.DefaultHeadlessRule{
 				Domain:       badoption.Listable[string]{"example.com"},
 				DomainSuffix: badoption.Listable[string]{".example.org"},
-				IPCIDR:       badoption.Listable[string]{"10.0.0.0/8", "2001:db8::/32", "192.0.2.1"},
+				IPCIDR: badoption.Listable[*badoption.Prefixable]{
+					new(badoption.Prefixable(netip.MustParsePrefix("10.0.0.0/8"))),
+					new(badoption.Prefixable(netip.MustParsePrefix("2001:db8::/32"))),
+					new(badoption.Prefixable(netip.MustParsePrefix("192.0.2.1/32"))),
+				},
 			},
 		},
 		{
@@ -36,7 +40,7 @@ func TestMmapMatchesSource(t *testing.T) {
 					Type: C.RuleTypeDefault,
 					DefaultOptions: option.DefaultHeadlessRule{
 						AdGuardDomain: badoption.Listable[string]{"||ads.example.net^"},
-						SourceIPCIDR:  badoption.Listable[string]{"172.16.0.0/12"},
+						SourceIPCIDR:  badoption.Listable[*badoption.Prefixable]{new(badoption.Prefixable(netip.MustParsePrefix("172.16.0.0/12")))},
 					},
 				}},
 			},

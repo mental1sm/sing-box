@@ -44,7 +44,14 @@ func NewTLS(ctx context.Context, logger log.ContextLogger, tag string, options o
 	}
 	tlsOptions := common.PtrValueOrDefault(options.TLS)
 	tlsOptions.Enabled = true
-	tlsConfig, err := tls.NewClient(ctx, logger, options.Server, tlsOptions)
+	tlsConfig, err := tls.NewClientWithOptions(tls.ClientOptions{
+		Context:        ctx,
+		Logger:         logger,
+		ServerAddress:  options.Server,
+		Options:        tlsOptions,
+		DomainResolver: options.DomainResolver,
+		DirectResolver: true,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -85,15 +92,12 @@ func NewTLSRaw(logger logger.ContextLogger, adapter dns.TransportAdapter, dialer
 	return t
 }
 
-func (t *TLSTransport) Start(stage adapter.StartStage) error {
+func (t *TLSTransport) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
+	scope.Add(t.multiplexer.Close)
 	return dialer.InitializeDetour(t.dialer)
-}
-
-func (t *TLSTransport) Close() error {
-	return t.multiplexer.Close()
 }
 
 func (t *TLSTransport) Reset() {

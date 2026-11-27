@@ -79,15 +79,12 @@ func NewTCPRaw(adapter dns.TransportAdapter, dialer N.Dialer, serverAddr M.Socks
 	return t
 }
 
-func (t *TCPTransport) Start(stage adapter.StartStage) error {
+func (t *TCPTransport) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
+	scope.Add(t.multiplexer.Close)
 	return dialer.InitializeDetour(t.dialer)
-}
-
-func (t *TCPTransport) Close() error {
-	return t.multiplexer.Close()
 }
 
 func (t *TCPTransport) Reset() {
@@ -145,17 +142,17 @@ func ReadMessage(reader io.Reader) (*mDNS.Msg, error) {
 }
 
 func WriteMessage(writer io.Writer, messageId uint16, message *mDNS.Msg) error {
-	requestLen := message.Len()
-	buffer := buf.NewSize(3 + requestLen)
+	buffer := buf.NewSize(3 + message.Len())
 	defer buffer.Release()
-	common.Must(binary.Write(buffer, binary.BigEndian, uint16(requestLen)))
-	exMessage := *message
+	lengthBuffer := buffer.Extend(2)
+	exMessage := message.Copy()
 	exMessage.Id = messageId
 	exMessage.Compress = true
 	rawMessage, err := exMessage.PackBuffer(buffer.FreeBytes())
 	if err != nil {
 		return err
 	}
+	binary.BigEndian.PutUint16(lengthBuffer, uint16(len(rawMessage)))
 	buffer.Truncate(2 + len(rawMessage))
 	return common.Error(writer.Write(buffer.Bytes()))
 }

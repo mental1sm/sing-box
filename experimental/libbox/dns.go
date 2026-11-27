@@ -46,12 +46,8 @@ func newPlatformTransport(ctx context.Context, logger log.ContextLogger, iif Loc
 	}, nil
 }
 
-func (p *platformTransport) Start(stage adapter.StartStage) error {
+func (p *platformTransport) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	p.preferredResolver.Start(stage)
-	return nil
-}
-
-func (p *platformTransport) Close() error {
 	return nil
 }
 
@@ -62,6 +58,35 @@ func (p *platformTransport) PreferredDomain(domain string) bool {
 	return p.preferredResolver.PreferredDomain(domain)
 }
 
+func (p *platformTransport) ServerAddresses() []netip.Addr {
+	if p.networkManager == nil {
+		return nil
+	}
+	defaultInterface := p.networkManager.DefaultNetworkInterface()
+	if defaultInterface == nil {
+		return nil
+	}
+	var serverAddresses []netip.Addr
+	for _, server := range defaultInterface.DNSServers {
+		serverAddr, err := netip.ParseAddr(server)
+		if err == nil {
+			serverAddresses = append(serverAddresses, serverAddr)
+		}
+	}
+	return serverAddresses
+}
+
+func (p *platformTransport) SearchDomains() []string {
+	if p.networkManager == nil {
+		return nil
+	}
+	defaultInterface := p.networkManager.DefaultNetworkInterface()
+	if defaultInterface == nil {
+		return nil
+	}
+	return normalizeSearchDomains(defaultInterface.DNSSearchDomains)
+}
+
 func (p *platformTransport) Environment() []string {
 	if p.networkManager == nil {
 		return nil
@@ -70,7 +95,16 @@ func (p *platformTransport) Environment() []string {
 	if defaultInterface == nil {
 		return nil
 	}
-	return defaultInterface.DNSServers
+	searchDomains := normalizeSearchDomains(defaultInterface.DNSSearchDomains)
+	environment := make([]string, 0, len(defaultInterface.DNSServers)+len(searchDomains))
+	environment = append(environment, defaultInterface.DNSServers...)
+	return append(environment, searchDomains...)
+}
+
+func normalizeSearchDomains(searchDomains []string) []string {
+	return common.Filter(common.Map(searchDomains, mDNS.Fqdn), func(it string) bool {
+		return it != "."
+	})
 }
 
 func (p *platformTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
@@ -82,7 +116,7 @@ func (p *platformTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*m
 		context: ctx,
 	}
 	if p.iif.Raw() {
-		messageBytes, err := message.Pack()
+		messageBytes, err := message.Copy().Pack()
 		if err != nil {
 			return nil, err
 		}
@@ -184,5 +218,6 @@ func (c *ExchangeContext) ErrnoCode(code int32) {
 var (
 	_ adapter.DNSTransport                    = (*platformTransport)(nil)
 	_ adapter.DNSTransportWithPreferredDomain = (*platformTransport)(nil)
+	_ adapter.DNSTransportWithConfiguration   = (*platformTransport)(nil)
 	_ adapter.DNSTransportWithEnvironment     = (*platformTransport)(nil)
 )

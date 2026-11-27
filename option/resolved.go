@@ -6,7 +6,6 @@ import (
 	"reflect"
 
 	"github.com/sagernet/sing-box/schema"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/json/badoption"
 )
@@ -33,7 +32,7 @@ func (r *ResolvedServiceOptions) UnmarshalJSONContext(ctx context.Context, bytes
 		return err
 	}
 	if r.Listen == nil {
-		r.Listen = (*badoption.Addr)(common.Ptr(netip.AddrFrom4([4]byte{127, 0, 0, 53})))
+		r.Listen = (*badoption.Addr)(new(netip.AddrFrom4([4]byte{127, 0, 0, 53})))
 	}
 	if r.ListenPort == 0 {
 		r.ListenPort = 53
@@ -53,7 +52,6 @@ func (r ResolvedServiceOptions) DescribeSchema(builder schema.Builder) (*schema.
 type ResolvedDNSServerOptions struct {
 	Service                string `json:"service"`
 	AcceptDefaultResolvers bool   `json:"accept_default_resolvers,omitempty"`
-	// NDots                  int                `json:"ndots,omitempty"`
 	// Timeout                badoption.Duration `json:"timeout,omitempty"`
 	// Attempts               int                `json:"attempts,omitempty"`
 	// Rotate                 bool               `json:"rotate,omitempty"`

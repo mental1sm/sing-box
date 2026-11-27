@@ -61,7 +61,7 @@ func (m *Manager) Name() string {
 	return "http-client"
 }
 
-func (m *Manager) Start(stage adapter.StartStage) error {
+func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
@@ -72,6 +72,7 @@ func (m *Manager) Start(stage adapter.StartStage) error {
 		}
 		m.defaultTransport = sharedTransport
 	}
+	scope.Add(m.close)
 	return nil
 }
 
@@ -163,12 +164,9 @@ func (m *Manager) ResetNetwork() {
 	}
 }
 
-func (m *Manager) Close() error {
+func (m *Manager) close() error {
 	m.access.Lock()
 	defer m.access.Unlock()
-	if m.managedTransports == nil {
-		return nil
-	}
 	var err error
 	for _, transport := range m.managedTransports {
 		err = E.Append(err, transport.close(), func(err error) error {
@@ -180,16 +178,22 @@ func (m *Manager) Close() error {
 	return err
 }
 
-func (m *Manager) References() []string {
+func (m *Manager) References() ([]string, []string) {
 	m.access.Lock()
 	defer m.access.Unlock()
-	var references []string
-	var needDefault bool
+	var (
+		references    []string
+		dnsReferences []string
+		needDefault   bool
+	)
 	for _, transport := range m.managedTransports {
 		if transport.detour != "" {
 			references = append(references, transport.detour)
 		} else if transport.defaultOutbound {
 			needDefault = true
+		}
+		if transport.domainResolver != "" {
+			dnsReferences = append(dnsReferences, transport.domainResolver)
 		}
 	}
 	if needDefault {
@@ -201,5 +205,5 @@ func (m *Manager) References() []string {
 			}
 		}
 	}
-	return references
+	return references, dnsReferences
 }

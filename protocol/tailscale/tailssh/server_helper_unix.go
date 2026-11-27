@@ -1,4 +1,4 @@
-//go:build with_gvisor && !windows
+//go:build with_tailscale && !windows
 
 package tailssh
 
@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	gliderssh "github.com/sagernet/gliderssh"
 	"github.com/sagernet/sing-box/adapter"
+	E "github.com/sagernet/sing/common/exceptions"
 )
 
 func isPrivilegedUser() bool {
@@ -21,10 +23,21 @@ func requestedUserMatchesProcess(localUser *adapter.PlatformUser) (bool, error) 
 	return localUser.Uid == os.Getuid() && localUser.Gid == os.Getgid(), nil
 }
 
-// verifyShellIdentity is a no-op on Unix: spawned shells and sftp-server drop to the
-// requested user via setCredential, so the child already runs as that user.
-func verifyShellIdentity(_ adapter.PlatformInterface, _ *adapter.PlatformUser) error {
-	return nil
+func verifyShellIdentity(platformInterface adapter.PlatformInterface, localUser *adapter.PlatformUser) error {
+	if platformInterface != nil && platformInterface.UsePlatformShell() {
+		return nil
+	}
+	match, err := requestedUserMatchesProcess(localUser)
+	if err != nil {
+		return err
+	}
+	if match {
+		return nil
+	}
+	if !isPrivilegedUser() {
+		return E.New("switching to local user ", localUser.Username, " requires sing-box to run as root")
+	}
+	return checkSwitchUserPrivilege(localUser)
 }
 
 func systemHostKeyPath() string {
@@ -39,33 +52,56 @@ func userSocketDirectories(localUser *adapter.PlatformUser) []string {
 	return gliderssh.UserSocketDirectories(localUser.HomeDir, strconv.Itoa(localUser.Uid))
 }
 
+type agentListener struct {
+	net.Listener
+}
+
+func (l *agentListener) Close() error {
+	err := l.Listener.Close()
+	agentDir := filepath.Dir(l.Addr().String())
+	if filepath.Dir(agentDir) == filepath.Clean(os.TempDir()) && strings.HasPrefix(filepath.Base(agentDir), "auth-agent") {
+		os.RemoveAll(agentDir)
+	}
+	return err
+}
+
 func newAgentListener(localUser *adapter.PlatformUser) (net.Listener, error) {
-	listener, err := gliderssh.NewAgentListener()
+	gliderListener, err := gliderssh.NewAgentListener()
 	if err != nil {
 		return nil, err
 	}
+	listener := &agentListener{Listener: gliderListener}
 	socketPath := listener.Addr().String()
 	if localUser.Uid < 0 || localUser.Uid == os.Getuid() {
 		return listener, nil
-	}
-	err = os.Chown(socketPath, localUser.Uid, localUser.Gid)
-	if err != nil {
-		listener.Close()
-		return nil, err
 	}
 	err = os.Chmod(socketPath, 0o600)
 	if err != nil {
 		listener.Close()
 		return nil, err
 	}
-	// Make the MkdirTemp parent traversable so the dropped-privilege child can
-	// reach the socket.
-	err = os.Chmod(filepath.Dir(socketPath), 0o755)
+	err = os.Chown(socketPath, localUser.Uid, localUser.Gid)
+	if err != nil {
+		listener.Close()
+		return nil, err
+	}
+	err = os.Chown(filepath.Dir(socketPath), localUser.Uid, localUser.Gid)
 	if err != nil {
 		listener.Close()
 		return nil, err
 	}
 	return listener, nil
+}
+
+func chownUserSocket(listener net.Listener, localUser *adapter.PlatformUser) error {
+	if localUser.Uid < 0 || localUser.Uid == os.Getuid() {
+		return nil
+	}
+	return os.Lchown(listener.Addr().String(), localUser.Uid, localUser.Gid)
+}
+
+func privilegedPortRestricted(localUser *adapter.PlatformUser) bool {
+	return !isRootUser(localUser)
 }
 
 func platformEnvironment(_ *adapter.PlatformUser) []string {

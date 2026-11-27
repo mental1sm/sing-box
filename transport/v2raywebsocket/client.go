@@ -6,19 +6,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/badhttp"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
-	"github.com/sagernet/sing/common/bufio/deadline"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	sHTTP "github.com/sagernet/sing/protocol/http"
 	"github.com/sagernet/ws"
 )
 
@@ -48,7 +46,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 	requestURL.Host = serverAddr.String()
 	requestURL.Path = options.Path
-	err := sHTTP.URLSetPath(&requestURL, options.Path)
+	err := badhttp.URLSetPath(&requestURL, options.Path)
 	if err != nil {
 		return nil, E.Cause(err, "parse path")
 	}
@@ -81,35 +79,37 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	if c.maxEarlyData > 0 {
 		return &EarlyWebsocketConn{Client: c, rawConn: conn, create: make(chan struct{})}, nil
 	}
-	websocketConn, err := c.upgrade(conn, &c.requestURL, c.headers)
+	websocketConn, err := c.upgrade(ctx, conn, &c.requestURL, c.headers)
 	if err != nil {
 		return nil, err
 	}
 	return websocketConn, nil
 }
 
-func (c *Client) upgrade(conn net.Conn, requestURL *url.URL, headers http.Header) (*WebsocketConn, error) {
-	var deadlineConn net.Conn
-	if deadline.NeedAdditionalReadDeadline(conn) {
-		deadlineConn = deadline.NewConn(conn)
-	} else {
-		deadlineConn = conn
-	}
-	deadlineConn.SetDeadline(time.Now().Add(C.TCPTimeout))
+func (c *Client) upgrade(ctx context.Context, conn net.Conn, requestURL *url.URL, headers http.Header) (*WebsocketConn, error) {
 	var protocols []string
-	if protocolHeader := headers.Get("Sec-WebSocket-Protocol"); protocolHeader != "" {
+	protocolHeader := headers.Get("Sec-WebSocket-Protocol")
+	if protocolHeader != "" {
 		protocols = []string{protocolHeader}
+		headers = headers.Clone()
 		headers.Del("Sec-WebSocket-Protocol")
 	}
-	reader, _, err := ws.Dialer{Header: ws.HandshakeHeaderHTTP(headers), Protocols: protocols}.Upgrade(deadlineConn, requestURL)
-	deadlineConn.SetDeadline(time.Time{})
+	ctx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() {
+		conn.Close()
+	})
+	reader, _, err := ws.Dialer{Header: ws.HandshakeHeaderHTTP(headers), Protocols: protocols}.Upgrade(conn, requestURL)
+	if !stop() {
+		err = ctx.Err()
+	}
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
 	if reader != nil {
 		buffer := buf.NewSize(reader.Buffered())
-		_, err = buffer.ReadFullFrom(reader, buffer.Len())
+		_, err = buffer.ReadFullFrom(reader, buffer.FreeLen())
 		if err != nil {
 			conn.Close()
 			return nil, err

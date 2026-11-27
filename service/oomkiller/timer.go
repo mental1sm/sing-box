@@ -110,6 +110,8 @@ type timerState struct {
 	pendingPressureBaseline bool
 	pressureBaseline        memorySample
 	pressureBaselineTime    time.Time
+	hasReset                bool
+	bestSinceReset          memorySample
 }
 
 type adaptiveTimer struct {
@@ -127,6 +129,7 @@ type adaptiveTimer struct {
 	lastGoroutines  int
 	lastConnections int
 	lastGCCycles    uint64
+	releaseGCCycles uint64
 	lastRelease     time.Time
 	timerState
 }
@@ -197,6 +200,10 @@ func (t *adaptiveTimer) poll() {
 	}
 	previousState := t.state
 	t.state = t.nextState(sample)
+	if t.hasReset {
+		t.bestSinceReset.usage = min(t.bestSinceReset.usage, sample.usage)
+		t.bestSinceReset.available = max(t.bestSinceReset.available, sample.available)
+	}
 	if t.state == pressureStateNormal {
 		t.forceMinInterval = false
 		if !t.pressureBaselineTime.IsZero() && time.Since(t.pressureBaselineTime) > t.maxInterval {
@@ -205,7 +212,7 @@ func (t *adaptiveTimer) poll() {
 	}
 	interval := t.intervalForState()
 	t.timer.Reset(interval)
-	triggered = previousState != pressureStateTriggered && t.state == pressureStateTriggered
+	triggered = t.state == pressureStateTriggered && t.resetDue(sample)
 	if !triggered && !t.pressureBaselineTime.IsZero() && t.memoryLimit > 0 &&
 		sample.usage > t.pressureBaseline.usage && sample.usage < t.memoryLimit {
 		elapsed := time.Since(t.pressureBaselineTime)
@@ -221,6 +228,10 @@ func (t *adaptiveTimer) poll() {
 				t.state = pressureStateTriggered
 			}
 		}
+	}
+	if triggered {
+		t.hasReset = true
+		t.bestSinceReset = sample
 	}
 	state := t.state
 	t.access.Unlock()
@@ -265,13 +276,28 @@ func (t *adaptiveTimer) poll() {
 	}
 }
 
+func (t *adaptiveTimer) resetDue(sample memorySample) bool {
+	if !t.hasReset {
+		return true
+	}
+	switch t.policyMode {
+	case policyModeMemoryLimit, policyModeNetworkExtension:
+		return sample.usage-t.bestSinceReset.usage >= t.limitThresholds.trigger-t.limitThresholds.armed
+	case policyModeAvailable:
+		thresholds := t.availableThresholds(sample)
+		return t.bestSinceReset.available-sample.available >= thresholds.armed-thresholds.trigger
+	default:
+		return false
+	}
+}
+
 func (t *adaptiveTimer) releaseIdleMemory(sample memorySample, connections int) {
 	goroutines := runtime.NumGoroutine()
 	gcCycles := readGCCycles()
 	now := time.Now()
 	t.access.Lock()
 	shrank := hasMeaningfulDrop(t.lastGoroutines, goroutines) || hasMeaningfulDrop(t.lastConnections, connections)
-	idleGC := gcCycles == t.lastGCCycles
+	idleGC := gcCycles == t.lastGCCycles && gcCycles != t.releaseGCCycles
 	t.lastGoroutines = goroutines
 	t.lastConnections = connections
 	t.lastGCCycles = gcCycles
@@ -284,6 +310,7 @@ func (t *adaptiveTimer) releaseIdleMemory(sample memorySample, connections int) 
 	runtimeDebug.FreeOSMemory()
 	t.access.Lock()
 	t.lastGCCycles = readGCCycles()
+	t.releaseGCCycles = t.lastGCCycles
 	t.access.Unlock()
 	t.logger.Trace("released idle memory, usage: ", byteformats.FormatMemoryBytes(sample.usage), " -> ", byteformats.FormatMemoryBytes(memory.Total()))
 }
@@ -333,6 +360,9 @@ func (t *adaptiveTimer) releaseMemory() {
 	t.pressure.Store(uint32(tun.MemoryPressureCritical))
 	badCleanup()
 	runtimeDebug.FreeOSMemory()
+	t.access.Lock()
+	t.releaseGCCycles = readGCCycles()
+	t.access.Unlock()
 }
 
 func (s pressureState) memoryPressure() tun.MemoryPressure {
@@ -349,20 +379,18 @@ func (s pressureState) memoryPressure() tun.MemoryPressure {
 func (t *adaptiveTimer) nextState(sample memorySample) pressureState {
 	switch t.policyMode {
 	case policyModeMemoryLimit, policyModeNetworkExtension:
-		return nextPressureState(t.state,
+		return nextPressureState(
 			sample.usage >= t.limitThresholds.trigger,
 			sample.usage >= t.limitThresholds.armed,
-			sample.usage >= t.limitThresholds.resume,
 		)
 	case policyModeAvailable:
 		if !sample.availableKnown {
 			return pressureStateNormal
 		}
 		thresholds := t.availableThresholds(sample)
-		return nextPressureState(t.state,
+		return nextPressureState(
 			sample.available <= thresholds.trigger,
 			sample.available <= thresholds.armed,
-			sample.available <= thresholds.resume,
 		)
 	default:
 		return pressureStateNormal
@@ -430,13 +458,7 @@ func (t *adaptiveTimer) logDetails(sample memorySample) string {
 	return ""
 }
 
-func nextPressureState(current pressureState, shouldTrigger, shouldArm, shouldStayTriggered bool) pressureState {
-	if current == pressureStateTriggered {
-		if shouldStayTriggered {
-			return pressureStateTriggered
-		}
-		return pressureStateNormal
-	}
+func nextPressureState(shouldTrigger, shouldArm bool) pressureState {
 	if shouldTrigger {
 		return pressureStateTriggered
 	}

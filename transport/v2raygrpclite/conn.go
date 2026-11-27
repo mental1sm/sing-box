@@ -2,11 +2,13 @@ package v2raygrpclite
 
 import (
 	std_bufio "bufio"
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing/common"
@@ -27,8 +29,11 @@ type GunConn struct {
 	flusher       http.Flusher
 	create        chan struct{}
 	err           error
-	readRemaining int
+	cancel        context.CancelFunc
+	readRemaining uint64
 	onClose       func()
+	access        sync.Mutex
+	closed        bool
 }
 
 func newGunConn(reader io.Reader, writer io.Writer, flusher http.Flusher) *GunConn {
@@ -40,20 +45,31 @@ func newGunConn(reader io.Reader, writer io.Writer, flusher http.Flusher) *GunCo
 	}
 }
 
-func newLateGunConn(writer io.Writer) *GunConn {
+func newLateGunConn(writer io.Writer, cancel context.CancelFunc) *GunConn {
 	return &GunConn{
 		create: make(chan struct{}),
 		writer: writer,
+		cancel: cancel,
 	}
 }
 
 func (c *GunConn) setup(reader io.Reader, err error) {
-	if reader != nil {
-		c.rawReader = reader
-		c.reader = std_bufio.NewReader(reader)
+	c.access.Lock()
+	closed := c.closed
+	if closed {
+		c.err = net.ErrClosed
+	} else {
+		if reader != nil {
+			c.rawReader = reader
+			c.reader = std_bufio.NewReader(reader)
+		}
+		c.err = err
 	}
-	c.err = err
 	close(c.create)
+	c.access.Unlock()
+	if closed {
+		common.Close(reader)
+	}
 }
 
 func (c *GunConn) Read(b []byte) (n int, err error) {
@@ -62,7 +78,7 @@ func (c *GunConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *GunConn) read(b []byte) (n int, err error) {
-	if c.reader == nil {
+	if c.create != nil {
 		<-c.create
 		if c.err != nil {
 			return 0, c.err
@@ -70,11 +86,11 @@ func (c *GunConn) read(b []byte) (n int, err error) {
 	}
 
 	if c.readRemaining > 0 {
-		if len(b) > c.readRemaining {
+		if uint64(len(b)) > c.readRemaining {
 			b = b[:c.readRemaining]
 		}
 		n, err = c.reader.Read(b)
-		c.readRemaining -= n
+		c.readRemaining -= uint64(n)
 		return
 	}
 
@@ -88,14 +104,13 @@ func (c *GunConn) read(b []byte) (n int, err error) {
 		return
 	}
 
-	readLen := int(dataLen)
-	c.readRemaining = readLen
-	if len(b) > readLen {
-		b = b[:readLen]
+	c.readRemaining = dataLen
+	if uint64(len(b)) > dataLen {
+		b = b[:dataLen]
 	}
 
 	n, err = c.reader.Read(b)
-	c.readRemaining -= n
+	c.readRemaining -= uint64(n)
 	return
 }
 
@@ -142,7 +157,18 @@ func (c *GunConn) FrontHeadroom() int {
 }
 
 func (c *GunConn) Close() error {
-	err := common.Close(c.rawReader, c.writer)
+	c.access.Lock()
+	if c.closed {
+		c.access.Unlock()
+		return net.ErrClosed
+	}
+	c.closed = true
+	reader := c.rawReader
+	c.access.Unlock()
+	err := common.Close(reader, c.writer)
+	if c.cancel != nil {
+		c.cancel()
+	}
 	if c.onClose != nil {
 		c.onClose()
 	}
